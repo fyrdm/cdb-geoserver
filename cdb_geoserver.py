@@ -253,9 +253,9 @@ def vrt_xml(tiles, layout, vrt_dir, single_tile=False):
     return "\n".join(out) + "\n"
 
 
-def indexer_properties(name, dimension=True):
+def indexer_properties(name):
     """ImageMosaic indexer: VRT granules with an integer "lod" attribute read from the file
-    name, published as the custom dimension LOD unless `dimension` is False."""
+    name, published as the custom dimension LOD."""
     return "\n".join([
         f"Name={name}",
         f"TypeName={name}",
@@ -264,7 +264,7 @@ def indexer_properties(name, dimension=True):
         "AbsolutePath=false",
         f"Schema=*the_geom:Polygon,location:String,{INDEX_ATTRIBUTE}:Integer",
         f"PropertyCollectors=IntegerFileNameExtractorSPI[{LOD_REGEX_FILE}]({INDEX_ATTRIBUTE})",
-        *([f"AdditionalDomainAttributes={DIMENSION}({INDEX_ATTRIBUTE})"] if dimension else []),
+        f"AdditionalDomainAttributes={DIMENSION}({INDEX_ATTRIBUTE})",
         "Caching=false",
         "",
     ])
@@ -300,7 +300,7 @@ def footprint_wkt(tile, whole_geocell):
     """Footprint of a granule: the geocell, or the one tile, in degrees (Vol 1 §8.6.2.2,
     §8.6.2.5). Cutting granules to it trims the half post that corner-grid Elevation pixels
     reach past the west and north edges (Vol 1 §10.6 Req 86), which would otherwise stick
-    out of coarse LODs drawn under finer ones."""
+    out of the tile."""
     width = geocell_width(tile.lat)
     if whole_geocell:
         w, s, e, n = tile.lon, tile.lat, tile.lon + width, tile.lat + 1
@@ -311,12 +311,12 @@ def footprint_wkt(tile, whole_geocell):
     return f"POLYGON (({w!r} {s!r}, {e!r} {s!r}, {e!r} {n!r}, {w!r} {n!r}, {w!r} {s!r}))"
 
 
-def write_mosaic(folder, name, granules, layout, dimension=True):
+def write_mosaic(folder, name, granules, layout):
     """Write the mosaic folder: indexer files, and the VRTs of granule_files() with a WKT
     footprint file next to each."""
     os.makedirs(folder, exist_ok=True)
     with open(os.path.join(folder, "indexer.properties"), "w", encoding="utf-8") as f:
-        f.write(indexer_properties(name, dimension))
+        f.write(indexer_properties(name))
     with open(os.path.join(folder, LOD_REGEX_FILE + ".properties"), "w", encoding="utf-8") as f:
         f.write(lod_regex_properties())
     for file_name, tiles, single in granule_files(granules):
@@ -326,20 +326,18 @@ def write_mosaic(folder, name, granules, layout, dimension=True):
             f.write(footprint_wkt(tiles[0], not single))
 
 
-def coverage_xml(title, dimension=True):
-    """Coverage settings: WGS-84 geographic; granules cut to their footprints and drawn finest
-    LOD on top; with `dimension`, LOD as a list dimension whose default is the largest
-    (finest) LOD present."""
-    metadata = (f"<metadata><entry key={quoteattr('custom_dimension_' + DIMENSION)}>"
-                "<dimensionInfo><enabled>true</enabled><presentation>LIST</presentation>"
-                "<defaultValue><strategy>MAXIMUM</strategy></defaultValue>"
-                "</dimensionInfo></entry></metadata>") if dimension else ""
+def coverage_xml(title):
+    """Coverage settings: WGS-84 geographic, granules cut to their footprints, and LOD as a
+    list dimension whose default is the largest (finest) LOD present."""
     return (f"<coverage><title>{escape(title)}</title><enabled>true</enabled>"
             "<srs>EPSG:4326</srs><projectionPolicy>FORCE_DECLARED</projectionPolicy>"
             "<parameters>"
             "<entry><string>FootprintBehavior</string><string>Cut</string></entry>"
-            f"<entry><string>SORTING</string><string>{INDEX_ATTRIBUTE} D</string></entry>"
-            f"</parameters>{metadata}</coverage>")
+            "</parameters>"
+            f"<metadata><entry key={quoteattr('custom_dimension_' + DIMENSION)}>"
+            "<dimensionInfo><enabled>true</enabled><presentation>LIST</presentation>"
+            "<defaultValue><strategy>MAXIMUM</strategy></defaultValue>"
+            "</dimensionInfo></entry></metadata></coverage>")
 
 
 def elevation_sld(name, low, high):
@@ -429,7 +427,7 @@ class GeoServer:
         return status
 
 
-def publish_layer(gs, workspace, name, title, mosaic_dir, replace, style=None, dimension=True):
+def publish_layer(gs, workspace, name, title, mosaic_dir, replace, style=None):
     q = urllib.parse.quote
     store = f"/workspaces/{q(workspace)}/coveragestores/{q(name)}"
     if gs.request("GET", store + ".json", accept=(200, 404)) == 200:
@@ -439,8 +437,7 @@ def publish_layer(gs, workspace, name, title, mosaic_dir, replace, style=None, d
         gs.request("DELETE", store + "?recurse=true&purge=none")
     gs.request("PUT", store + "/external.imagemosaic?configure=all", mosaic_dir,
                "text/plain")
-    gs.request("PUT", f"{store}/coverages/{q(name)}", coverage_xml(title, dimension),
-               "application/xml")
+    gs.request("PUT", f"{store}/coverages/{q(name)}", coverage_xml(title), "application/xml")
     if style:
         sname, sld = style
         styles = f"/workspaces/{q(workspace)}/styles"
@@ -463,8 +460,7 @@ def ensure_workspace(gs, workspace):
 
 def publish(root, mosaics, gs, workspace="cdb", datasets=None, min_lod=-10, max_lod=23,
             server_paths=(), replace=False, elevation_range=None, log=print):
-    """Write the mosaic folders under `mosaics` and publish two layers per dataset/component:
-    `name`, one LOD at a time (DIM_LOD), and `name`_all, every LOD with the finest on top.
+    """Write the mosaic folders under `mosaics` and publish one layer per dataset/component.
     Returns the layer names."""
     tiles_dir = find_tiles_dir(root)
     mosaics = os.path.abspath(mosaics)
@@ -492,23 +488,20 @@ def publish(root, mosaics, gs, workspace="cdb", datasets=None, min_lod=-10, max_
                 lo, hi = value_range([t.path for (_, _, lod), ts in granules.items()
                                       if lod == pick for t in ts])
             style = (name + "_ramp", elevation_sld(name + "_ramp", lo, hi))
-        for layer, dimension in ((name, True), (name + "_all", False)):
-            folder = os.path.join(mosaics, layer)
-            if os.path.exists(folder):
-                if not replace:
-                    raise ValueError(f"{folder} exists; use --replace")
-                shutil.rmtree(folder)
-            write_mosaic(folder, layer, granules, layout, dimension)
-            title = f"{dataset_dir} {component}" + ("" if dimension else ", all LODs")
-            publish_layer(gs, workspace, layer, title, map_path(folder, server_paths), replace,
-                          style, dimension)
-            names.append(layer)
+        folder = os.path.join(mosaics, name)
+        if os.path.exists(folder):
+            if not replace:
+                raise ValueError(f"{folder} exists; use --replace")
+            shutil.rmtree(folder)
+        write_mosaic(folder, name, granules, layout)
+        publish_layer(gs, workspace, name, f"{dataset_dir} {component}",
+                      map_path(folder, server_paths), replace, style)
+        names.append(name)
         partial = sorted({lod for (_, _, lod), ts in granules.items()
                           if len(ts) < tiles_per_side(lod) ** 2})
         log(f"{workspace}:{name}: {len(granule_files(granules))} granules, "
             f"LOD {lods[0]}..{lods[-1]} (default {lods[-1]})"
-            + (f"; LOD {', '.join(map(str, partial))} cover part of a geocell" if partial else "")
-            + f"; {workspace}:{name}_all: every LOD, finest on top")
+            + (f"; LOD {', '.join(map(str, partial))} cover part of a geocell" if partial else ""))
     return names
 
 

@@ -154,17 +154,10 @@ class Config(unittest.TestCase):
         self.assertIn("lod:Integer", props["Schema"])
         self.assertEqual(props["PropertyCollectors"], "IntegerFileNameExtractorSPI[lodregex](lod)")
 
-    def test_indexer_without_dimension(self):
-        text = c.indexer_properties("D004_Imagery_all", dimension=False)
-        self.assertNotIn("AdditionalDomainAttributes", text)
-        self.assertIn("lod:Integer", text)
-
     def test_coverage_parameters(self):
-        for dimension in (True, False):
-            cov = ET.fromstring(c.coverage_xml("t", dimension))
-            params = {e[0].text: e[1].text for e in cov.findall("parameters/entry")}
-            self.assertEqual(params, {"FootprintBehavior": "Cut", "SORTING": "lod D"})
-            self.assertEqual(cov.find("metadata") is not None, dimension)
+        cov = ET.fromstring(c.coverage_xml("t"))
+        params = {e[0].text: e[1].text for e in cov.findall("parameters/entry")}
+        self.assertEqual(params, {"FootprintBehavior": "Cut"})
 
     def test_footprints(self):
         t = parse("N47/E008/004_Imagery/L02/U3/N47E008_D004_S001_T001_L02_U3_R1.jp2")
@@ -180,8 +173,8 @@ class Config(unittest.TestCase):
         tiles = [parse(f"N47/E008/004_Imagery/L01/U{u}/N47E008_D004_S001_T001_L01_U{u}_R{r}.jp2")
                  for u, r in ((0, 0), (1, 1))]
         with tempfile.TemporaryDirectory() as d:
-            c.write_mosaic(d, "D004_Imagery_all", {(47, 8, 1): tiles},
-                           c.BandLayout("Byte", ("Red", "Green", "Blue")), dimension=False)
+            c.write_mosaic(d, "D004_Imagery", {(47, 8, 1): tiles},
+                           c.BandLayout("Byte", ("Red", "Green", "Blue")))
             self.assertEqual(sorted(os.listdir(d)), [
                 "N47E008_LOD+01_U0_R0.vrt", "N47E008_LOD+01_U0_R0.wkt",
                 "N47E008_LOD+01_U1_R1.vrt", "N47E008_LOD+01_U1_R1.wkt",
