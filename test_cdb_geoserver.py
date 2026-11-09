@@ -154,6 +154,39 @@ class Config(unittest.TestCase):
         self.assertIn("lod:Integer", props["Schema"])
         self.assertEqual(props["PropertyCollectors"], "IntegerFileNameExtractorSPI[lodregex](lod)")
 
+    def test_indexer_without_dimension(self):
+        text = c.indexer_properties("D004_Imagery_all", dimension=False)
+        self.assertNotIn("AdditionalDomainAttributes", text)
+        self.assertIn("lod:Integer", text)
+
+    def test_coverage_parameters(self):
+        for dimension in (True, False):
+            cov = ET.fromstring(c.coverage_xml("t", dimension))
+            params = {e[0].text: e[1].text for e in cov.findall("parameters/entry")}
+            self.assertEqual(params, {"FootprintBehavior": "Cut", "SORTING": "lod D"})
+            self.assertEqual(cov.find("metadata") is not None, dimension)
+
+    def test_footprints(self):
+        t = parse("N47/E008/004_Imagery/L02/U3/N47E008_D004_S001_T001_L02_U3_R1.jp2")
+        self.assertEqual(c.footprint_wkt(t, True),
+                         "POLYGON ((8 47, 9 47, 9 48, 8 48, 8 47))")
+        self.assertEqual(c.footprint_wkt(t, False),
+                         "POLYGON ((8.25 47.75, 8.5 47.75, 8.5 48.0, 8.25 48.0, 8.25 47.75))")
+        t = parse("N60/E008/001_Elevation/L01/U0/N60E008_D001_S001_T001_L01_U0_R1.tif")
+        self.assertEqual(c.footprint_wkt(t, False),  # 2° wide geocell (Table 3-29)
+                         "POLYGON ((9.0 60.0, 10.0 60.0, 10.0 60.5, 9.0 60.5, 9.0 60.0))")
+
+    def test_write_mosaic(self):
+        tiles = [parse(f"N47/E008/004_Imagery/L01/U{u}/N47E008_D004_S001_T001_L01_U{u}_R{r}.jp2")
+                 for u, r in ((0, 0), (1, 1))]
+        with tempfile.TemporaryDirectory() as d:
+            c.write_mosaic(d, "D004_Imagery_all", {(47, 8, 1): tiles},
+                           c.BandLayout("Byte", ("Red", "Green", "Blue")), dimension=False)
+            self.assertEqual(sorted(os.listdir(d)), [
+                "N47E008_LOD+01_U0_R0.vrt", "N47E008_LOD+01_U0_R0.wkt",
+                "N47E008_LOD+01_U1_R1.vrt", "N47E008_LOD+01_U1_R1.wkt",
+                "indexer.properties", "lodregex.properties"])
+
     def test_coverage_and_style_are_xml(self):
         cov = ET.fromstring(c.coverage_xml("004_Imagery S001_T001"))
         self.assertEqual(cov.find("metadata/entry").get("key"), "custom_dimension_LOD")
