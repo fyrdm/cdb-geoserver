@@ -111,6 +111,40 @@ class Vrt(unittest.TestCase):
         self.assertEqual(band.find("SimpleSource/SrcRect").get("xSize"), "128")
 
 
+class PartialLod(unittest.TestCase):
+    def tiles(self, lod, addresses):
+        return [parse(f"N47/E008/004_Imagery/L{lod:02d}/U{u}/"
+                      f"N47E008_D004_S001_T001_L{lod:02d}_U{u}_R{r}.jp2") for u, r in addresses]
+
+    def test_full_lod_is_one_granule_partial_lod_one_per_tile(self):
+        granules = {(47, 8, 1): self.tiles(1, [(0, 0), (0, 1), (1, 0), (1, 1)]),
+                    (47, 8, 2): self.tiles(2, [(3, 1), (0, 2)])}
+        files = c.granule_files(granules)
+        self.assertEqual([(f, single) for f, _, single in files],
+                         [("N47E008_LOD+01.vrt", False),
+                          ("N47E008_LOD+02_U3_R1.vrt", True),
+                          ("N47E008_LOD+02_U0_R2.vrt", True)])
+
+    def test_single_tile_vrt(self):
+        t = self.tiles(2, [(3, 1)])[0]
+        root = ET.fromstring(c.vrt_xml([t], c.BandLayout("Byte", ("Red", "Green", "Blue")),
+                                       "/m", single_tile=True))
+        self.assertEqual(root.get("rasterXSize"), "1024")
+        gt = [float(v) for v in root.findtext("GeoTransform").split(",")]
+        # U3 R1 at LOD 2: west 8.25, north 48.0 (the top row of the geocell).
+        self.assertAlmostEqual(gt[0], 8.25)
+        self.assertAlmostEqual(gt[3], 48.0)
+        dst = root.find("VRTRasterBand/SimpleSource/DstRect")
+        self.assertEqual((dst.get("xOff"), dst.get("yOff")), ("0", "0"))
+
+    def test_single_tile_corner_grid(self):
+        t = parse("N47/E008/001_Elevation/L01/U0/N47E008_D001_S001_T001_L01_U0_R1.tif")
+        root = ET.fromstring(c.vrt_xml([t], c.BandLayout("Float32", ("Gray",)), "/m", True))
+        gt = [float(v) for v in root.findtext("GeoTransform").split(",")]
+        self.assertAlmostEqual(gt[0], 8.5 - 0.5 / 2048)
+        self.assertAlmostEqual(gt[3], 47.5 + 0.5 / 2048)
+
+
 class Config(unittest.TestCase):
     def test_indexer(self):
         props = dict(line.split("=", 1) for line in c.indexer_properties("D001_Elevation").split("\n")

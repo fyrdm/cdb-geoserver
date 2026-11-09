@@ -190,10 +190,12 @@ def geocell_name(lat, lon):
     return f"{'N' if lat >= 0 else 'S'}{abs(lat):02d}{'E' if lon >= 0 else 'W'}{abs(lon):03d}"
 
 
-def granule_name(lat, lon, lod):
-    """VRT file name of one geocell at one LOD, e.g. N47E008_LOD+03.vrt, N47E008_LOD-10.vrt.
-    The signed number is what the mosaic indexer reads into the "lod" attribute."""
-    return f"{geocell_name(lat, lon)}_LOD{lod:+03d}.vrt"
+def granule_name(lat, lon, lod, tile=None):
+    """VRT file name of one geocell at one LOD, e.g. N47E008_LOD+03.vrt, N47E008_LOD-10.vrt,
+    or of one tile of it, e.g. N47E008_LOD+03_U5_R2.vrt. The signed number is what the
+    mosaic indexer reads into the "lod" attribute."""
+    name = f"{geocell_name(lat, lon)}_LOD{lod:+03d}"
+    return f"{name}_U{tile.u}_R{tile.r}.vrt" if tile else name + ".vrt"
 
 
 def geocell_grid(dataset, lat, lon, lod):
@@ -213,8 +215,9 @@ def geocell_grid(dataset, lat, lon, lod):
     return size, (west, dx, 0.0, north, 0.0, -dy)
 
 
-def vrt_xml(tiles, layout, vrt_dir):
-    """GDAL VRT that places the tiles of one geocell at one LOD by their CDB address.
+def vrt_xml(tiles, layout, vrt_dir, single_tile=False):
+    """GDAL VRT that places the tiles of one geocell at one LOD by their CDB address, or with
+    `single_tile`, a VRT that covers just tiles[0].
 
     The tiles' own georeferencing is not needed (CDB readers ignore GeoTIFF tags, Vol 1 §9);
     each tile goes to row (n-1-U), column R of the geocell (Vol 1 §8.6.2.5, §8.6.3.1).
@@ -222,6 +225,11 @@ def vrt_xml(tiles, layout, vrt_dir):
     t0 = tiles[0]
     size, gt = geocell_grid(t0.dataset, t0.lat, t0.lon, t0.lod)
     n, ts = tiles_per_side(t0.lod), raster_size(t0.lod)
+    origin = (0, 0)  # pixel offset of the VRT's corner in the geocell grid
+    if single_tile:
+        tiles, size = tiles[:1], ts
+        origin = (t0.r * ts, (n - 1 - t0.u) * ts)
+        gt = (gt[0] + origin[0] * gt[1], gt[1], 0.0, gt[3] + origin[1] * gt[5], 0.0, gt[5])
     out = [f'<VRTDataset rasterXSize="{size}" rasterYSize="{size}">',
            # WGS-84 geographic, longitude first in the geotransform (Vol 1 §8.6.2).
            '  <SRS dataAxisToSRSAxisMapping="2,1">EPSG:4326</SRS>',
@@ -237,7 +245,7 @@ def vrt_xml(tiles, layout, vrt_dir):
                     f'      <SourceFilename relativeToVRT="1">{escape(rel)}</SourceFilename>',
                     f"      <SourceBand>{b}</SourceBand>",
                     f'      <SrcRect xOff="0" yOff="0" xSize="{ts}" ySize="{ts}"/>',
-                    f'      <DstRect xOff="{t.r * ts}" yOff="{(n - 1 - t.u) * ts}" '
+                    f'      <DstRect xOff="{t.r * ts - origin[0]}" yOff="{(n - 1 - t.u) * ts - origin[1]}" '
                     f'xSize="{ts}" ySize="{ts}"/>',
                     "    </SimpleSource>"]
         out.append("  </VRTRasterBand>")
@@ -275,16 +283,29 @@ def group_by_layer(tiles):
     return groups
 
 
+def granule_files(granules):
+    """[(file name, tiles, single_tile)]: one VRT per geocell and LOD when that LOD holds every
+    tile of the geocell, else one VRT per tile, so the mosaic footprint covers only the tiles
+    that exist and the rest stays transparent instead of zero."""
+    files = []
+    for (lat, lon, lod), tiles in sorted(granules.items()):
+        if len(tiles) == tiles_per_side(lod) ** 2:
+            files.append((granule_name(lat, lon, lod), tiles, False))
+        else:
+            files += [(granule_name(lat, lon, lod, t), [t], True) for t in tiles]
+    return files
+
+
 def write_mosaic(folder, name, granules, layout):
-    """Write the mosaic folder: indexer files and one VRT per geocell and LOD."""
+    """Write the mosaic folder: indexer files and the VRTs of granule_files()."""
     os.makedirs(folder, exist_ok=True)
     with open(os.path.join(folder, "indexer.properties"), "w", encoding="utf-8") as f:
         f.write(indexer_properties(name))
     with open(os.path.join(folder, LOD_REGEX_FILE + ".properties"), "w", encoding="utf-8") as f:
         f.write(lod_regex_properties())
-    for (lat, lon, lod), tiles in sorted(granules.items()):
-        with open(os.path.join(folder, granule_name(lat, lon, lod)), "w", encoding="utf-8") as f:
-            f.write(vrt_xml(tiles, layout, folder))
+    for file_name, tiles, single in granule_files(granules):
+        with open(os.path.join(folder, file_name), "w", encoding="utf-8") as f:
+            f.write(vrt_xml(tiles, layout, folder, single))
 
 
 def coverage_xml(title):
@@ -453,8 +474,11 @@ def publish(root, mosaics, gs, workspace="cdb", datasets=None, min_lod=-10, max_
             style = (name + "_ramp", elevation_sld(name + "_ramp", lo, hi))
         publish_layer(gs, workspace, name, f"{dataset_dir} {component}",
                       map_path(folder, server_paths), replace, style)
-        log(f"{workspace}:{name}: {len(granules)} granules, LOD {lods[0]}..{lods[-1]} "
-            f"(default {lods[-1]})")
+        partial = sorted({lod for (_, _, lod), ts in granules.items()
+                          if len(ts) < tiles_per_side(lod) ** 2})
+        log(f"{workspace}:{name}: {len(granule_files(granules))} granules, "
+            f"LOD {lods[0]}..{lods[-1]} (default {lods[-1]})"
+            + (f"; LOD {', '.join(map(str, partial))} cover part of a geocell" if partial else ""))
         names.append(name)
     return names
 

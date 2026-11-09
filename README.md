@@ -24,7 +24,10 @@ for Elevation (CDB 1.3 Vol 1 §10.6.1).
 For each dataset, the script writes a mosaic folder under `--mosaics` holding:
 
 - one small GDAL VRT per geocell and LOD (`N47E008_LOD+03.vrt`), which places that LOD's
-  tiles by their CDB address (Vol 1 §8.6.2, §8.6.3.1), so no pixels are copied;
+  tiles by their CDB address (Vol 1 §8.6.2, §8.6.3.1), so no pixels are copied. When a
+  LOD holds only some of a geocell's tiles, each tile gets its own VRT
+  (`N47E008_LOD+03_U5_R2.vrt`), so the missing tiles stay transparent rather than drawn
+  as black or 0 m;
 - `indexer.properties` and `lodregex.properties`, which make GeoServer index the VRTs with
   an integer `lod` attribute.
 
