@@ -15,6 +15,11 @@ GetMap ...&layers=cdb:D004_Imagery&DIM_LOD=3
 GetCoverage ...&coverageId=cdb__D001_Elevation&subset=Lat(47.4,47.5)&subset=Long(8.5,8.6)
 ```
 
+In QGIS, add a WMS connection per LOD, e.g. `http://<host>:8080/geoserver/cdb/wms?DIM_LOD=4`,
+and tick "Ignore GetMap/GetTile/GetLegendGraphic URI reported in capabilities", or QGIS
+drops `DIM_LOD`. To browse over a base map, give each LOD layer a scale range so only the
+LODs that fit the zoom are loaded; one request over every LOD at once is too slow.
+
 Elevation gets a color-ramp style that spans the store's height range. Imagery uses the
 default RGB style. WCS returns the stored values: Float32 metres above the WGS-84 ellipsoid
 for Elevation (CDB 1.3 Vol 1 §10.6.1).
@@ -28,6 +33,9 @@ For each dataset, the script writes a mosaic folder under `--mosaics` holding:
   LOD holds only some of a geocell's tiles, each tile gets its own VRT
   (`N47E008_LOD+03_U5_R2.vrt`), so the missing tiles stay transparent rather than drawn
   as black or 0 m;
+- a `.wkt` footprint per VRT (its geocell or tile), which GeoServer cuts the granule to, so
+  the half post that corner-grid Elevation reaches past the west and north edges does not
+  stick out of the geocell;
 - `indexer.properties` and `lodregex.properties`, which make GeoServer index the VRTs with
   an integer `lod` attribute.
 

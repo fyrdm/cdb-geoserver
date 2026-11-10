@@ -296,8 +296,24 @@ def granule_files(granules):
     return files
 
 
+def footprint_wkt(tile, whole_geocell):
+    """Footprint of a granule: the geocell, or the one tile, in degrees (Vol 1 §8.6.2.2,
+    §8.6.2.5). Cutting granules to it trims the half post that corner-grid Elevation pixels
+    reach past the west and north edges (Vol 1 §10.6 Req 86), which would otherwise stick
+    out of the tile."""
+    width = geocell_width(tile.lat)
+    if whole_geocell:
+        w, s, e, n = tile.lon, tile.lat, tile.lon + width, tile.lat + 1
+    else:
+        k = tiles_per_side(tile.lod)
+        w, s = tile.lon + tile.r * width / k, tile.lat + tile.u / k
+        e, n = w + width / k, s + 1 / k
+    return f"POLYGON (({w!r} {s!r}, {e!r} {s!r}, {e!r} {n!r}, {w!r} {n!r}, {w!r} {s!r}))"
+
+
 def write_mosaic(folder, name, granules, layout):
-    """Write the mosaic folder: indexer files and the VRTs of granule_files()."""
+    """Write the mosaic folder: indexer files, and the VRTs of granule_files() with a WKT
+    footprint file next to each."""
     os.makedirs(folder, exist_ok=True)
     with open(os.path.join(folder, "indexer.properties"), "w", encoding="utf-8") as f:
         f.write(indexer_properties(name))
@@ -306,13 +322,18 @@ def write_mosaic(folder, name, granules, layout):
     for file_name, tiles, single in granule_files(granules):
         with open(os.path.join(folder, file_name), "w", encoding="utf-8") as f:
             f.write(vrt_xml(tiles, layout, folder, single))
+        with open(os.path.join(folder, file_name[:-4] + ".wkt"), "w", encoding="utf-8") as f:
+            f.write(footprint_wkt(tiles[0], not single))
 
 
 def coverage_xml(title):
-    """Coverage settings: WGS-84 geographic, and LOD as a list dimension whose default is the
-    largest (finest) LOD present."""
+    """Coverage settings: WGS-84 geographic, granules cut to their footprints, and LOD as a
+    list dimension whose default is the largest (finest) LOD present."""
     return (f"<coverage><title>{escape(title)}</title><enabled>true</enabled>"
             "<srs>EPSG:4326</srs><projectionPolicy>FORCE_DECLARED</projectionPolicy>"
+            "<parameters>"
+            "<entry><string>FootprintBehavior</string><string>Cut</string></entry>"
+            "</parameters>"
             f"<metadata><entry key={quoteattr('custom_dimension_' + DIMENSION)}>"
             "<dimensionInfo><enabled>true</enabled><presentation>LIST</presentation>"
             "<defaultValue><strategy>MAXIMUM</strategy></defaultValue>"
@@ -455,13 +476,8 @@ def publish(root, mosaics, gs, workspace="cdb", datasets=None, min_lod=-10, max_
     names = []
     for (dataset_dir, component), granules in groups.items():
         name = layer_name(dataset_dir, component, components[dataset_dir])
-        folder = os.path.join(mosaics, name)
-        if os.path.exists(folder):
-            if not replace:
-                raise ValueError(f"{folder} exists; use --replace")
-            shutil.rmtree(folder)
         first = next(iter(granules.values()))[0]
-        write_mosaic(folder, name, granules, read_layout(first.path))
+        layout = read_layout(first.path)
         lods = sorted({lod for _, _, lod in granules})
         style = None
         if first.dataset == ELEVATION_DATASET:
@@ -472,14 +488,20 @@ def publish(root, mosaics, gs, workspace="cdb", datasets=None, min_lod=-10, max_
                 lo, hi = value_range([t.path for (_, _, lod), ts in granules.items()
                                       if lod == pick for t in ts])
             style = (name + "_ramp", elevation_sld(name + "_ramp", lo, hi))
+        folder = os.path.join(mosaics, name)
+        if os.path.exists(folder):
+            if not replace:
+                raise ValueError(f"{folder} exists; use --replace")
+            shutil.rmtree(folder)
+        write_mosaic(folder, name, granules, layout)
         publish_layer(gs, workspace, name, f"{dataset_dir} {component}",
                       map_path(folder, server_paths), replace, style)
+        names.append(name)
         partial = sorted({lod for (_, _, lod), ts in granules.items()
                           if len(ts) < tiles_per_side(lod) ** 2})
         log(f"{workspace}:{name}: {len(granule_files(granules))} granules, "
             f"LOD {lods[0]}..{lods[-1]} (default {lods[-1]})"
             + (f"; LOD {', '.join(map(str, partial))} cover part of a geocell" if partial else ""))
-        names.append(name)
     return names
 
 
